@@ -1,0 +1,1275 @@
+#!/usr/bin/env python
+"""
+Obsidian2Chirpy 主程序
+将Obsidian格式的Markdown文件转换为Chirpy主题博客兼容的格式
+
+用法：
+python main.py [文件名/文件夹名/路径]
+"""
+
+import sys
+from obsidian2chirpy.core.file_processor import process_folder
+
+def process_md(text):
+    # 处理连续的"$$"块，替换为\\[和\\]
+    def replace_double(match):
+        replace_double.counter += 1
+        return '\\\\[' if replace_double.counter % 2 == 1 else '\\\\]'
+    replace_double.counter = 0  # 初始化计数器
+    text = re.sub(r'\$\$', replace_double, text)  # 全局替换连续的$$
+
+    # 处理单独的"$"块，替换为\\(和\\)
+    def replace_single(match):
+        replace_single.counter += 1
+        return '\\\\(' if replace_single.counter % 2 == 1 else '\\\\)'
+    replace_single.counter = 0  # 初始化计数器
+    text = re.sub(r'\$', replace_single, text)  # 全局替换单独的$
+
+    return text
+
+def format_time_with_limited_seconds(format_str="%Y-%m-%d %H:%M:%S"):
+    """
+    格式化当前时间，确保秒数不超过60
+    
+    Args:
+        format_str: 时间格式字符串
+        
+    Returns:
+        格式化的时间字符串，秒数限制在0-59范围内
+    """
+    # 获取当前时间
+    current_time = time.localtime()
+    # 创建一个新的时间元组，将秒数限制在0-59范围内
+    limited_time = time.struct_time((
+        current_time.tm_year,
+        current_time.tm_mon,
+        current_time.tm_mday,
+        current_time.tm_hour,
+        current_time.tm_min,
+        min(current_time.tm_sec, 59),  # 确保秒数不超过59
+        current_time.tm_wday,
+        current_time.tm_yday,
+        current_time.tm_isdst
+    ))
+    # 使用修改后的时间元组进行格式化
+    return time.strftime(format_str, limited_time)
+
+def add_newlines(text):
+    """
+    在\\[前面和\\]后面添加换行
+    """
+    # 在\\[前面添加换行
+    text = re.sub(r'(?<!\\)(\\\\)\[', r'\n\1[', text)
+    
+    # 在\\]后面添加换行
+    text = re.sub(r'(?<!\\)(\\\\)\]', r'\1]\n', text)
+    
+    return text
+
+def ensure_blank_lines_around_math_blocks(text):
+    """
+    确保\\[前面和\\]后面有完整的空行
+    """
+    # 确保\\[前面有一整个空行
+    text = re.sub(r'(?<!\n\n)(\\\\)\[', r'\n\n\1[', text)
+    
+    # 确保\\]后面有一整个空行
+    text = re.sub(r'(\\\\)\](?!\n\n)', r'\1]\n\n', text)
+    
+    # 避免出现过多的空行
+    text = re.sub(r'\n{3,}', r'\n\n', text)
+    
+    return text
+
+def replace_with_dollars(text):
+    """
+    将所有"\\["、"\\]"、"\\("、"\\)"都替换成"$$"
+    """
+    text = re.sub(r'\\\\[\[\]]', r'$$', text)  # 替换\\[和\\]
+    text = re.sub(r'\\\\[\(\)]', r'$$', text)  # 替换\\(和\\)
+    return text
+
+def fix_double_braces_and_vertical_bars(text):
+    """
+    在数学公式中:
+    1. 处理连续的花括号，在两个左花括号之间添加空格
+    2. 将成对的绝对值符号 |...| 替换为 \lvert ... \rvert
+    """
+    # 提取所有数学区块 (处于\\[ 和 \\] 或 \\( 和 \\) 之间的内容)
+    def process_math_block(match):
+        math_content = match.group(1)
+        
+        # 处理连续的左花括号，在两个左花括号之间添加空格
+        math_content = re.sub(r'{{', r'{ {', math_content)
+        
+        # 处理绝对值符号
+        # 先处理 \left| 和 \right|
+        math_content = re.sub(r'\\left\|', r'\\lvert ', math_content)
+        math_content = re.sub(r'\\right\|', r'\\rvert ', math_content)
+        
+        # 然后处理成对的单独 | 符号
+        # 计数器跟踪当前是第几个 | 符号
+        def replace_vertical_bar(match):
+            replace_vertical_bar.counter += 1
+            if replace_vertical_bar.counter % 2 == 1:  # 奇数位的 |，替换为 \vert
+                return r"\vert "  # 修复：使用单斜杠而不是双斜杠
+            else:  # 偶数位的 |，替换为 \vert
+                return r"\vert "  # 修复：使用单斜杠而不是双斜杠
+        
+        replace_vertical_bar.counter = 0  # 初始化计数器
+        
+        # 使用正则替换所有未被转义的单独 | 符号
+        # 但要避免匹配已经处理过的 \left\lvert 和 \right\rvert
+        math_content = re.sub(r'(?<!\\)(?<!\\left)(?<!\\right)\|', replace_vertical_bar, math_content)
+        
+        return match.group(0).replace(match.group(1), math_content)
+    
+    # 处理行间公式
+    text = re.sub(r'\\\\[\[](.+?)\\\\[\]]', process_math_block, text, flags=re.DOTALL)
+    
+    # 处理行内公式
+    text = re.sub(r'\\\\[\(](.+?)\\\\[\)]', process_math_block, text, flags=re.DOTALL)
+    
+    return text
+
+
+def process_yaml_frontmatter(text):
+    """
+    处理YAML前置元数据:
+    1. 提取标题 (使用文件名)
+    2. 将'created'改为'date'
+    3. 将'updated'改为'last_modified_at'
+    4. 添加空的categories、math和tags字段
+    5. 删除其他键值对
+    6. 确保日期时间的秒数小于60
+    7. 移除时间后的时区信息
+    """
+    # 检查文档是否有YAML前置元数据
+    yaml_match = re.match(r'^---\s*\n(.*?)\n---\s*\n', text, re.DOTALL)
+    
+    # 从文件路径中提取文件名
+    # 注意：这里需要从外部传入文件路径，因此我们需要修改函数签名
+    # 在此处暂存一个占位符，后面会更新实现
+    title = "Untitled"  # 这将在process_and_format_md函数中被替换为实际文件名
+    
+    if not yaml_match:
+        # 如果没有元数据块，创建新的元数据块
+        yaml_content = f"---\ntitle: \"{title}\"\ndate: \ncategories: \nmath: true\ntags: \n---\n\n"
+        return yaml_content + text
+    
+    # 提取元数据内容
+    yaml_content = yaml_match.group(1)
+    rest_of_doc = text[yaml_match.end():]
+    
+    # 提取已存在的值
+    created_match = re.search(r'created:\s*(.*?)(?:\n|$)', yaml_content)
+    created = created_match.group(1).strip() if created_match else ""
+    
+    # 去掉时间中的时区信息（如 +0800）
+    if created and len(created) > 19:  # 标准格式 "YYYY-MM-DD HH:MM:SS" 是19个字符
+        created = created[:19]  # 只保留前19个字符
+    
+    # 确保created日期时间的秒数小于60
+    if created and re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', created):
+        date_parts = created.split(' ')
+        if len(date_parts) == 2:
+            time_parts = date_parts[1].split(':')
+            if len(time_parts) == 3 and int(time_parts[2]) >= 60:
+                time_parts[2] = str(min(int(time_parts[2]), 59)).zfill(2)
+                date_parts[1] = ':'.join(time_parts)
+                created = ' '.join(date_parts)
+    
+    updated_match = re.search(r'updated:\s*(.*?)(?:\n|$)', yaml_content)
+    updated = updated_match.group(1).strip() if updated_match else ""
+    
+    # 去掉时间中的时区信息（如 +0800）
+    if updated and len(updated) > 19:  # 标准格式 "YYYY-MM-DD HH:MM:SS" 是19个字符
+        timezone = updated[20:]
+        updated = updated[:19]  # 只保留前19个字符
+        
+    
+    # 确保updated日期时间的秒数小于60
+    if updated and re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', updated):
+        date_parts = updated.split(' ')
+        if len(date_parts) == 2:
+            time_parts = date_parts[1].split(':')
+            if len(time_parts) == 3 and int(time_parts[2]) >= 60:
+                time_parts[2] = str(min(int(time_parts[2]), 59)).zfill(2)
+                date_parts[1] = ':'.join(time_parts)
+                updated = ' '.join(date_parts)
+    
+    # 创建新的YAML前置元数据
+    new_yaml = f"---\ntitle: \"{title}\"\n"
+    if created:
+        new_yaml += f"date: {created} {timezone}\n"
+    if updated:
+        new_yaml += f"last_modified_at: {updated} {timezone}\n"
+    
+    new_yaml += "categories: \nmath: true\ntags: \n---\n\n"
+    
+    return new_yaml + rest_of_doc
+
+# 添加一个函数用于提取文档中的日期信息
+def extract_date_from_content(text):
+    """
+    从文档内容中提取日期信息
+    返回格式为YYYY-MM-DD的日期字符串，如果未找到则返回None
+    """
+    # 查找YAML前置元数据中的日期
+    date_match = re.search(r'date:\s*(\d{4}-\d{2}-\d{2})', text)
+    if date_match:
+        return date_match.group(1)
+    return None
+
+# 添加处理callout格式转换的函数
+def convert_callouts(text, file_path=None, decisions_file_path='callout_decisions.json'):
+    """
+    转换Markdown中的callout格式
+    
+    从: >[xxx] TITLE
+        >say something...
+    
+    到: >TITLE
+        >
+        >say something...
+        {: .prompt-info}
+    
+    根据类型映射规则转换callout类型，或根据用户输入决定处理方式
+    
+    Args:
+        text: 要处理的文本内容
+        file_path: 当前处理的文件路径（用于记录特定文件的决策）
+        decisions_file_path: 决策文件路径
+    """
+    # 定义默认的callout类型映射
+    callout_type_mapping = {
+        'info': 'info',
+        'tip': 'tip',
+        'warning': 'warning', 
+        'danger': 'danger',
+        'quote': 'quote',
+        'question': 'tip',  # question映射到tip
+    }
+    
+    # 加载持久化的用户决策
+    global_decisions = load_user_decisions(decisions_file_path)
+    
+    # 用于存储本次运行中的用户决策（避免重复询问）
+    session_decisions = {}
+    
+    # 用于识别callout区块的正则表达式，注意>和[之间可能有空格，[和!之间可能有空格
+    pattern = r'(>\s*\[\s*!?\s*([^\]]+)\](.*?)(?=\n\s*>|\n\s*$)(?:\n(?:>[^\n]*\n)+))'
+    
+    def replace_callout(match):
+        full_callout = match.group(1)
+        callout_type = match.group(2).lower().strip() if match.group(2) else 'quote'
+        callout_type = callout_type.split('|')[0].strip()
+        title = match.group(3) if match.group(3) else ''
+        
+        # 处理callout内容
+        lines = full_callout.split('\n')
+        # 移除每行开头的 > 符号，这样后面重新构建时不会重复
+        rest_lines = [line.lstrip('>').lstrip() for line in lines[1:] if line.strip()]
+        
+        
+        # 构建新的callout内容时，重新添加 > 符号
+        if callout_type in callout_type_mapping:
+            mapped_type = callout_type_mapping[callout_type]
+            title_text = title.strip() if title else ""
+            # 只有当标题实际存在时才添加到第一行
+            first_line = f">{title_text}" if title_text else ""
+            new_callout = f"{first_line}\n"
+            
+            # 只有当标题实际存在时才添加空行
+            if title_text:
+                new_callout += ">\n"
+            
+            # 为每行添加 > 前缀
+            new_callout += "\n".join(f">{line}" for line in rest_lines)
+            
+            if not new_callout.endswith('\n'):
+                new_callout += '\n'
+            new_callout += f"{{: .prompt-{mapped_type}}}\n"
+            return new_callout
+        
+        # 对于未知类型，检查是否有文件特定的决策
+        file_specific_key = f"{file_path}:{callout_type}" if file_path else ""
+        if file_specific_key and file_specific_key in global_decisions:
+            decision = global_decisions[file_specific_key]
+        # 检查是否在本次会话中已做决策
+        elif callout_type in session_decisions:
+            decision = session_decisions[callout_type]
+        else:
+            # 询问用户如何处理此类型的callout
+            print(f"\n发现未支持的callout类型: [{callout_type}]")
+            print(f"示例内容: {title}")
+            print("请选择处理方式:")
+            print("I - 转换为info类型 (默认)")
+            print("Q - 转换为quote类型")
+            print("N - 删除此callout")
+            
+            valid_decisions = ['I', 'Q', 'N', '']
+            while True:
+                decision = input("您的选择 (I/Q/N 或回车默认为I): ").strip().upper()
+                if decision in valid_decisions:
+                    break
+                print("无效的选择，请重新输入")
+            
+            # 空输入默认为I
+            if decision == '':
+                decision = 'I'
+            
+            # 存储到文件特定决策中
+            if file_path:
+                global_decisions[file_specific_key] = decision
+            
+            # 同时存储到会话决策中
+            session_decisions[callout_type] = decision
+            
+            # 保存决策到文件
+            save_user_decisions(global_decisions, decisions_file_path)
+        
+        # 根据用户决策处理callout
+        if decision == 'N':
+            # 删除此callout
+            return ""
+        elif decision == 'I':
+            # 转换为info类型
+            # 检查标题是否只有空格
+            title_text = title.strip() if title else ""
+            first_line = f">{title}" if title_text else ""
+            new_callout = f"{first_line}\n"
+            
+            # 如果有实际标题（不只是空格），添加一个空的引用行作为分隔
+            if title_text:
+                new_callout += ">\n"
+            
+            new_callout += '\n'.join(f">{line}" for line in rest_lines)
+            if not new_callout.endswith('\n'):
+                new_callout += '\n'
+            new_callout += "{: .prompt-info}\n"
+            return new_callout
+        else:  # decision == 'Q'
+            # 转换为quote类型
+            # 检查标题是否只有空格
+            title_text = title.strip() if title else ""
+            first_line = f">{title}" if title_text else ">"
+            new_callout = f"{first_line}\n"
+            
+            # 如果有实际标题（不只是空格），添加一个空的引用行作为分隔
+            if title_text:
+                new_callout += ">\n"
+            
+            new_callout += "\n".join(f">{line}" for line in rest_lines)
+            if not new_callout.endswith('\n'):
+                new_callout += '\n'
+            new_callout += "{: .prompt-quote}\n"
+            return new_callout
+    
+    # 替换所有匹配的callout
+    return re.sub(pattern, replace_callout, text, flags=re.DOTALL)
+
+def convert_wiki_links(text):
+    """
+    将Obsidian的Wiki链接格式转换:
+    [[xxx|yyy]] 转换为 *yyy*
+    [[xxx]] 转换为 *xxx*
+    """
+    # 先匹配[[xxx|yyy]]格式
+    text = re.sub(r'\[\[([^\]|]+)\|([^\]]+)\]\]', r'*\2*', text)
+    
+    # 再匹配单独的[[xxx]]格式
+    text = re.sub(r'\[\[([^\]]+)\]\]', r'*\1*', text)
+    
+    return text
+
+# 添加确保callout前有空行的函数
+def ensure_blank_lines_before_callouts(text):
+    """
+    确保所有callout（格式为 >[!xxx]）前面有空行
+    """
+    # 匹配任何callout的开始行（以>开头，包含[!xxx]）
+    pattern = r'(?<!\n\n)(>\s*\[\s*!?\s*[^\]]+\])'
+    
+    # 在callout前添加空行
+    text = re.sub(pattern, r'\n\1', text)
+    
+    return text
+
+# 修改函数，确保相邻的callout之间有空行分隔
+def separate_adjacent_callouts(text):
+    """
+    在相邻的callout之间添加空行分隔
+    查找两个callout之间的分界点（第二个callout的开始处）并在此处插入空行
+    """
+    # 匹配两个callout的分界处，即前一行以>开头，当前行也以>开头且包含[!xxx]标记
+    pattern = r'(>\s*[^\n]*\n)(>\s*\[\s*!?\s*[^\]]+\])'
+    
+    # 在这种分界处添加一个空行
+    text = re.sub(pattern, r'\1\n\2', text)
+    
+    return text
+
+def process_and_format_md(text, file_path=None):
+    """
+    处理Markdown文件中的数学公式并添加换行
+    
+    Args:
+        text: 要处理的文本内容
+        file_path: 文件路径，用于提取文件名作为标题
+    """
+    # 从文件路径中提取文件名作为标题
+    title = "Untitled"
+    if file_path:
+        # 提取文件名（不含扩展名）
+        title = os.path.splitext(os.path.basename(file_path))[0]
+    
+    # 先处理YAML前置元数据
+    text = process_yaml_frontmatter(text)
+    
+    # 将占位符标题替换为实际文件名
+    text = text.replace('title: "Untitled"', f'title: "{title}"', 1)
+    
+    # 确保相邻callout之间有空行分隔
+    text = separate_adjacent_callouts(text)
+    
+    # 转换Wiki链接格式
+    text = convert_wiki_links(text)
+    
+    # 转换callout格式（传递文件路径用于记录特定文件的决策）
+    text = convert_callouts(text, file_path)
+    
+    # 处理数学公式
+    text = process_md(text)
+    
+    # 处理数学公式中的连续花括号和绝对值符号
+    text = fix_double_braces_and_vertical_bars(text)
+    
+    # 添加换行
+    text = add_newlines(text)
+    
+    # 确保数学块周围有完整的空行
+    text = ensure_blank_lines_around_math_blocks(text)
+    
+    # 最后将所有LaTeX分隔符替换为$$
+    text = replace_with_dollars(text)
+    
+    return text
+
+def scan_posts_directory(root_path, output_file='md_files_inventory.txt'):
+    """
+    递归搜索目录及其子目录下所有的md文件，记录其标题和路径到一个txt文件中
+    
+    Args:
+        root_path: _posts目录的根路径
+        output_file: 输出的记录文件名
+    
+    Returns:
+        包含所有文件信息的字典：{原始标题: 完整路径}
+    """
+    inventory = {}
+    output_path = os.path.join(os.path.dirname(root_path), output_file)
+    
+    # 确保输出目录存在
+    output_dir = os.path.dirname(output_path)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # 遍历目录
+    for root, _, files in os.walk(root_path):
+        for file in files:
+            if file.lower().endswith(('.md', '.markdown')):
+                file_path = os.path.join(root, file)
+                # 提取原始标题（移除日期前缀）
+                original_title = extract_original_title(file)
+                if original_title:
+                    inventory[original_title] = file_path
+    
+    # 将信息写入txt文件
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(f"# 文档索引 - 更新时间: {format_time_with_limited_seconds()}\n\n")
+        for title, path in inventory.items():
+            f.write(f"* {title}: {path}\n")
+    
+    return inventory
+
+# 添加计算文件哈希值的函数
+def calculate_file_hash(file_path):
+    """
+    计算文件的MD5哈希值
+    
+    Args:
+        file_path: 文件路径
+    
+    Returns:
+        MD5哈希值字符串
+    """
+    hash_md5 = hashlib.md5()
+    with open(file_path, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            hash_md5.update(chunk)
+    return hash_md5.hexdigest()
+
+# 添加读取文件哈希记录的函数
+def load_file_hashes(hash_file_path):
+    """
+    从记录文件中读取文件路径和对应的哈希值
+    
+    Args:
+        hash_file_path: 哈希记录文件路径
+    
+    Returns:
+        字典 {文件路径: 哈希值}
+    """
+    file_hashes = {}
+    
+    try:
+        # 确保文件所在目录存在
+        hash_file_dir = os.path.dirname(hash_file_path)
+        if not os.path.exists(hash_file_dir):
+            os.makedirs(hash_file_dir)
+            
+        if os.path.exists(hash_file_path):
+            with open(hash_file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if ':' in line and not line.startswith('#'):
+                        parts = line.strip().split(':', 1)
+                        file_path = parts[0].strip()
+                        hash_value = parts[1].strip()
+                        file_hashes[file_path] = hash_value
+        else:
+            # 文件不存在，创建空文件
+            with open(hash_file_path, 'w', encoding='utf-8') as f:
+                f.write(f"# 文件哈希值记录 - 创建时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            print(f"哈希记录文件不存在，已创建新文件: {hash_file_path}")
+    except Exception as e:
+        print(f"读取哈希记录失败: {e}")
+    return file_hashes
+
+# 添加保存文件哈希记录的函数
+def save_file_hashes(hash_file_path, file_hashes):
+    """
+    将文件路径和对应的哈希值保存到记录文件中
+    
+    Args:
+        hash_file_path: 哈希记录文件路径
+        file_hashes: 字典 {文件路径: 哈希值}
+    """
+    try:
+        with open(hash_file_path, 'w', encoding='utf-8') as f:
+            f.write(f"# 文件哈希值记录 - 更新时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+            for file_path, hash_value in sorted(file_hashes.items()):
+                f.write(f"{file_path}: {hash_value}\n")
+    except Exception as e:
+        print(f"保存哈希记录失败: {e}")
+
+# 添加按文件名搜索文件的函数
+def search_files_by_name(search_name, source_folder):
+    """
+    在源文件夹中搜索匹配给定文件名的文件
+    
+    Args:
+        search_name: 要搜索的文件名（不包含路径）
+        source_folder: 源文件夹路径
+    
+    Returns:
+        匹配文件路径的列表
+    """
+    matching_files = []
+    
+    for root, _, files in os.walk(source_folder):
+        for file in files:
+            if file.lower().endswith(('.md', '.markdown')):
+                # 不区分大小写进行匹配
+                if search_name.lower() in file.lower():
+                    matching_files.append(os.path.join(root, file))
+    
+    return matching_files
+
+# 添加从索引中查找源文件的函数
+def find_source_files_from_inventory(inventory_path, source_folder):
+    """
+    根据索引文件找到源文件夹中对应的源文件
+    使用正则表达式从文章路径中提取标题
+    
+    Args:
+        inventory_path: 文章索引文件路径
+        source_folder: 源文件文件夹路径
+    
+    Returns:
+        字典 {源文件路径: 对应的文章路径}
+    """
+    # 从索引文件中读取文章路径
+    post_paths = {}
+    if os.path.exists(inventory_path):
+        with open(inventory_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('* '):  # 匹配"* 标题: 路径"格式的行
+                    parts = line[2:].split(':', 1)
+                    if len(parts) == 2:
+                        path = parts[1].strip()
+                        # 使用正则表达式从路径中提取标题（去除日期前缀）
+                        title_match = re.search(r'/(\d{4}-\d{2}-\d{2}-(.*?))(\.md|\.markdown)?$', path)
+                        if title_match:
+                            title = title_match.group(2).lower()  # 提取不含日期前缀的标题
+                            post_paths[title] = path
+    
+    # 在源文件夹中查找对应的源文件
+    source_files = {}
+    for root, _, files in os.walk(source_folder):
+        for file in files:
+            if file.lower().endswith(('.md', '.markdown')):
+                file_path = os.path.join(root, file)
+                file_name_no_ext = os.path.splitext(file)[0].lower()
+                
+                # 检查是否匹配任何文章标题
+                if file_name_no_ext in post_paths:
+                    source_files[file_path] = post_paths[file_name_no_ext]
+    
+    return source_files
+
+def extract_original_title(filename):
+    """
+    从文件名中提取原始标题部分（去掉日期前缀YYYY-MM-DD-）
+    
+    Args:
+        filename: 文件名
+    
+    Returns:
+        原始标题部分，如果没有日期前缀则返回None
+    """
+    # 匹配YYYY-MM-DD-格式的日期前缀
+    match = re.match(r'\d{4}-\d{2}-\d{2}-(.*)', filename)
+    if match:
+        return match.group(1)
+    return None
+
+def extract_yaml_and_content(text):
+    """
+    从Markdown文本中提取所有YAML前置元数据块和内容部分
+    可能有多个YAML块，格式如：
+    ---
+    AAA
+    ---
+    BBB
+    ---
+    
+    Args:
+        text: 完整的Markdown文本
+    
+    Returns:
+        元组 (yaml_part, content_part)
+    """
+    # 找到所有连续的YAML块
+    # 首先检查文本是否以 --- 开头
+    if not text.strip().startswith('---'):
+        # 如果没有YAML前置元数据，则整个文本都是内容部分
+        return "", text
+    
+    # 查找所有的 --- 分隔行
+    yaml_separator_positions = []
+    lines = text.splitlines(True)  # 保留换行符
+    line_position = 0
+    
+    for i, line in enumerate(lines):
+        if line.strip() == '---':
+            yaml_separator_positions.append(line_position)
+        line_position += len(line)
+    
+    # 如果没有足够的分隔符，或者不是以 --- 开头，则视为无YAML
+    if len(yaml_separator_positions) < 2:
+        return "", text
+    
+    # 查找第一个二级标题位置（以 ## 开头的行）
+    first_header_position = -1
+    line_position = 0
+    for i, line in enumerate(lines):
+        if line.strip().startswith('## '):
+            first_header_position = line_position
+            break
+        line_position += len(line)
+    
+    # 确定YAML块结束位置
+    # 找到最后一个YAML分隔符，如果它在第一个二级标题之前
+    last_yaml_separator = -1
+    for pos in yaml_separator_positions:
+        if first_header_position == -1 or pos < first_header_position:
+            last_yaml_separator = pos
+    
+    # 如果找不到有效的YAML块结束位置，返回原文本
+    if last_yaml_separator == -1:
+        return "", text
+    
+    # 确定最后一个YAML分隔符的结束位置（包括换行符）
+    yaml_end_position = last_yaml_separator + 3  # --- 的长度为3
+    if yaml_end_position < len(text) and text[yaml_end_position] == '\n':
+        yaml_end_position += 1
+    
+    # 提取所有YAML块作为一个整体
+    yaml_part = text[:yaml_end_position]
+    
+    # 内容部分是剩余的文本
+    content_part = text[yaml_end_position:]
+    
+    return yaml_part, content_part
+
+def process_file(file_path, output_folder):
+    """
+    处理单个Markdown文件
+    
+    Args:
+        file_path: 要处理的文件路径
+        output_folder: 输出目录路径
+    
+    Returns:
+        是否成功处理
+    """
+    # 移除路径两端可能存在的引号
+    file_path = file_path.strip('\'"')
+    
+    print(f"正在处理：{file_path}")
+    
+    try:
+        # 读取文件内容
+        with open(file_path, 'r', encoding='utf-8') as f:
+            input_text = f.read()
+        
+        # 获取原始文件名（无路径）
+        original_filename = os.path.basename(file_path)
+        
+        # 扫描_posts目录，获取已存在文件的清单
+        posts_root = "/Users/pleiades/Desktop/site/2863189117.github.io/_posts"
+        existing_files = scan_posts_directory(posts_root)
+        
+        # 检查文件是否已存在（通过原始标题匹配）
+        file_exists = False
+        existing_path = None
+        
+        # 对比原始文件名和已存在文件的原始标题
+        for title, path in existing_files.items():
+            # 忽略文件扩展名和大小写进行比较
+            if os.path.splitext(original_filename.lower())[0] == os.path.splitext(title.lower())[0]:
+                file_exists = True
+                existing_path = path
+                break
+        
+        if file_exists and existing_path:
+            print(f"文件已存在于: {existing_path}")
+            
+            # 读取现有文件
+            with open(existing_path, 'r', encoding='utf-8') as f:
+                existing_content = f.read()
+            
+            # 提取现有文件的YAML前置元数据和内容
+            yaml_part, _ = extract_yaml_and_content(existing_content)
+            
+            # 检查是否包含 final_version: true
+            if re.search(r'final_version\s*:\s*true', yaml_part, re.IGNORECASE):
+                print(f"⚠️ 文件标记为最终版本，跳过更新: {existing_path}")
+                return True  # 返回True表示处理成功，但实际上是跳过了更新
+            
+            # 从输入文本中提取YAML元数据，检查是否有updated字段
+            input_yaml_match = re.search(r'^---\s*\n(.*?)\n---\s*\n', input_text, re.DOTALL)
+            updated_value = None
+            
+            if input_yaml_match:
+                input_yaml_content = input_yaml_match.group(1)
+                # 从输入文件的YAML中提取updated字段
+                updated_match = re.search(r'updated:\s*(.*?)(?:\n|$)', input_yaml_content)
+                if updated_match:
+                    updated_value = updated_match.group(1).strip()
+            
+            # 如果从输入文件中找到了updated值，则更新last_modified_at字段
+            if updated_value:
+                # 检查是否已有last_modified_at字段
+                if "last_modified_at:" in yaml_part:
+                    # 替换last_modified_at字段值
+                    yaml_part = re.sub(
+                        r'last_modified_at:.*?\n', 
+                        f'last_modified_at: {updated_value}\n', 
+                        yaml_part
+                    )
+                else:
+                    # 如果没有last_modified_at字段，则在date字段后添加
+                    yaml_part = re.sub(
+                        r'(date:.*?\n)', 
+                        f'\\1last_modified_at: {updated_value}\n', 
+                        yaml_part
+                    )
+            
+            # 处理输入文本内容
+            processed_text = process_and_format_md(input_text, file_path)
+            _, new_content = extract_yaml_and_content(processed_text)
+            
+            # 合并：保留更新后的YAML元数据，更新内容部分
+            output_text = f"{yaml_part}\n{new_content}"
+            
+            # 更新现有文件
+            with open(existing_path, 'w', encoding='utf-8') as f:
+                f.write(output_text)
+            
+            print(f"✓ 已更新现有文件：{existing_path}")
+            if updated_value:
+                print(f"  - 已更新last_modified_at字段为: {updated_value}")
+        else:
+            # 文件不存在，按原逻辑处理
+            processed_text = process_and_format_md(input_text, file_path)
+            
+            # 从处理后的内容中提取日期，用于文件名
+            date_str = extract_date_from_content(processed_text)
+            
+            # 决定输出文件名
+            if date_str:
+                # 格式化为 YYYY-MM-DD-原文件名
+                output_filename = f"{date_str}-{original_filename}"
+            else:
+                # 如果没找到日期，保持原文件名
+                output_filename = original_filename
+            
+            # 创建输出文件路径
+            output_file_path = os.path.join(output_folder, output_filename)
+            
+            # 写入处理后的内容到新文件
+            with open(output_file_path, 'w', encoding='utf-8') as f:
+                f.write(processed_text)
+            
+            print(f"✓ 新建文件：{output_file_path}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"× 处理失败：{file_path} - {str(e)}")
+        return False
+
+# 添加按文件夹名称搜索文件夹的函数
+def search_folders_by_name(search_name, source_folder):
+    """
+    在源文件夹中搜索匹配给定名称的文件夹
+    
+    Args:
+        search_name: 要搜索的文件夹名称
+        source_folder: 源文件夹路径
+    
+    Returns:
+        匹配文件夹路径的列表
+    """
+    matching_folders = []
+    
+    for root, dirs, _ in os.walk(source_folder):
+        for dir_name in dirs:
+            # 不区分大小写进行匹配
+            if search_name.lower() in dir_name.lower():
+                matching_folders.append(os.path.join(root, dir_name))
+    
+    return matching_folders
+
+# 修改处理文件夹的逻辑
+def process_folder(file_name_or_path):
+    """
+    根据文件名或文件夹名处理匹配的文件，或处理指定的路径
+    当输入为空时，自动处理特定目录
+    """
+    processed_count = 0
+    failed_count = 0
+    skipped_count = 0
+    updated_count = 0
+    unchanged_count = 0
+    
+    # 固定输出路径
+    output_folder = "/Users/pleiades/Desktop/site/2863189117.github.io/_posts/Uncategorized"
+    posts_root = "/Users/pleiades/Desktop/site/2863189117.github.io/_posts"
+    source_folder = "/Users/pleiades/Library/Mobile Documents/iCloud~md~obsidian/Documents/Pleiades_02"
+    inventory_path = os.path.join(os.path.dirname(posts_root), "md_files_inventory.txt")
+    hash_file_path = os.path.join(os.path.dirname(posts_root), "file_hash_record.txt")
+    
+    # 确保输出文件夹存在
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+    
+    # 始终更新文章索引文件
+    print("更新文章索引文件...")
+    inventory = scan_posts_directory(posts_root, os.path.basename(inventory_path))
+    print(f"索引文件已更新，共收录 {len(inventory)} 篇文章")
+    
+    # 加载文件哈希记录
+    file_hashes = load_file_hashes(hash_file_path)
+    updated_hashes = {}  # 用于记录本次处理后的哈希值
+    
+    # 检查输入是否为空
+    if not file_name_or_path.strip():
+        print("输入为空，自动处理源文件夹中的文件...")
+        
+        # 从源文件夹查找对应的源文件
+        source_files = find_source_files_from_inventory(inventory_path, source_folder)
+        
+        if not source_files:
+            print("没有找到匹配的源文件，请检查源文件夹和索引文件")
+            return
+        
+        print(f"找到 {len(source_files)} 个匹配的源文件")
+        
+        # 处理每个源文件
+        for source_path, post_path in source_files.items():
+            # 计算源文件的哈希值
+            try:
+                current_hash = calculate_file_hash(source_path)
+                
+                # 检查文件是否已经处理过且未修改
+                if source_path in file_hashes and file_hashes[source_path] == current_hash:
+                    print(f"跳过未修改的文件：{source_path}")
+                    unchanged_count += 1
+                    # 保存当前哈希值
+                    updated_hashes[source_path] = current_hash
+                    continue
+                
+                print(f"处理源文件：{source_path} -> {post_path}")
+                
+                # 处理文件并更新对应的文章
+                with open(source_path, 'r', encoding='utf-8') as f:
+                    input_text = f.read()
+                
+                # 读取目标文章
+                with open(post_path, 'r', encoding='utf-8') as f:
+                    existing_content = f.read()
+                
+                # 提取YAML前置元数据和内容
+                yaml_part, _ = extract_yaml_and_content(existing_content)
+                
+                # 检查是否包含 final_version: true
+                if re.search(r'final_version\s*:\s*true', yaml_part, re.IGNORECASE):
+                    print(f"⚠️ 文件标记为最终版本，跳过更新: {post_path}")
+                    unchanged_count += 1
+                    # 仍然保存当前哈希值，避免重复提示
+                    updated_hashes[source_path] = current_hash
+                    continue
+                
+                # 从输入文本中提取YAML元数据，检查是否有updated字段
+                input_yaml_match = re.search(r'^---\s*\n(.*?)\n---\s*\n', input_text, re.DOTALL)
+                updated_value = None
+                
+                if input_yaml_match:
+                    input_yaml_content = input_yaml_match.group(1)
+                    # 从输入文件的YAML中提取updated字段
+                    updated_match = re.search(r'updated:\s*(.*?)(?:\n|$)', input_yaml_content)
+                    if updated_match:
+                        updated_value = updated_match.group(1).strip()
+                
+                # 如果从输入文件中找到了updated值，则更新last_modified_at字段
+                if updated_value:
+                    # 检查是否已有last_modified_at字段
+                    if "last_modified_at:" in yaml_part:
+                        # 替换last_modified_at字段值
+                        yaml_part = re.sub(
+                            r'last_modified_at:.*?\n', 
+                            f'last_modified_at: {updated_value}\n', 
+                            yaml_part
+                        )
+                    else:
+                        # 如果没有last_modified_at字段，则在date字段后添加
+                        yaml_part = re.sub(
+                            r'(date:.*?\n)', 
+                            f'\\1last_modified_at: {updated_value}\n', 
+                            yaml_part
+                        )
+                
+                # 处理输入文本内容
+                processed_text = process_and_format_md(input_text, source_path)
+                _, new_content = extract_yaml_and_content(processed_text)
+                
+                # 合并：保留更新后的YAML元数据，更新内容部分
+                output_text = f"{yaml_part}\n{new_content}"
+                
+                # 更新文章文件
+                with open(post_path, 'w', encoding='utf-8') as f:
+                    f.write(output_text)
+                
+                # 更新哈希值记录
+                updated_hashes[source_path] = current_hash
+                
+                print(f"✓ 已更新文章：{post_path}")
+                if updated_value:
+                    print(f"  - 已更新last_modified_at字段为: {updated_value}")
+                
+                updated_count += 1
+                processed_count += 1
+                
+            except Exception as e:
+                print(f"× 处理失败：{source_path} - {str(e)}")
+                failed_count += 1
+        
+        # 保存更新后的哈希值记录
+        save_file_hashes(hash_file_path, updated_hashes)
+    
+    else:
+        # 检查输入是否是完整路径
+        if os.path.exists(file_name_or_path):
+            # 是完整路径，按原来的逻辑处理
+            path = file_name_or_path.strip('\'"')
+            
+            # 处理单个文件
+            if os.path.isfile(path):
+                if path.lower().endswith(('.md', '.markdown')):
+                    result = process_file(path, output_folder)
+                    if result:
+                        processed_count += 1
+                    else:
+                        failed_count += 1
+                else:
+                    print(f"跳过非Markdown文件：{path}")
+                    skipped_count += 1
+            
+            # 处理文件夹
+            elif os.path.isdir(path):
+                # 遍历文件夹中的所有文件
+                for root, _, files in os.walk(path):
+                    for file in files:
+                        # 只处理Markdown文件
+                        file_path = os.path.join(root, file)
+                        if file.lower().endswith(('.md', '.markdown')):
+                            result = process_file(file_path, output_folder)
+                            if result:
+                                processed_count += 1
+                            else:
+                                failed_count += 1
+                        else:
+                            skipped_count += 1
+        else:
+            # 首先尝试作为文件夹名搜索
+            matching_folders = search_folders_by_name(file_name_or_path, source_folder)
+            
+            # 再尝试作为文件名搜索
+            matching_files = search_files_by_name(file_name_or_path, source_folder)
+            
+            # 如果既找到了文件夹又找到了文件，询问用户想要处理哪种类型
+            if matching_folders and matching_files:
+                print(f"找到匹配'{file_name_or_path}'的文件和文件夹:")
+                print("文件夹:")
+                for i, folder_path in enumerate(matching_folders, 1):
+                    print(f"F{i}. {folder_path}")
+                print("\n文件:")
+                for i, file_path in enumerate(matching_files, 1):
+                    print(f"M{i}. {file_path}")
+                
+                # 获取用户选择
+                while True:
+                    try:
+                        choice = input("请选择要处理的项目类型和编号（如F1处理第1个文件夹, M2处理第2个文件，输入q退出）: ").strip()
+                        if choice.lower() == 'q':
+                            return
+                        if not (choice.startswith('F') or choice.startswith('f') or choice.startswith('M') or choice.startswith('m')):
+                            print("无效的选择，请以F或M开头")
+                            continue
+                        
+                        item_type = choice[0].upper()
+                        try:
+                            choice_index = int(choice[1:]) - 1
+                            if item_type == 'F' and 0 <= choice_index < len(matching_folders):
+                                # 处理选择的文件夹
+                                folder_path = matching_folders[choice_index]
+                                print(f"处理文件夹: {folder_path}")
+                                for root, _, files in os.walk(folder_path):
+                                    for file in files:
+                                        file_path = os.path.join(root, file)
+                                        if file.lower().endswith(('.md', '.markdown')):
+                                            result = process_file(file_path, output_folder)
+                                            if result:
+                                                processed_count += 1
+                                            else:
+                                                failed_count += 1
+                                        else:
+                                            skipped_count += 1
+                                break
+                            elif item_type == 'M' and 0 <= choice_index < len(matching_files):
+                                # 处理选择的文件
+                                file_path = matching_files[choice_index]
+                                print(f"处理文件: {file_path}")
+                                result = process_file(file_path, output_folder)
+                                if result:
+                                    processed_count += 1
+                                else:
+                                    failed_count += 1
+                                break
+                            else:
+                                print("无效的选择，请重新输入")
+                        except ValueError:
+                            print("请在类型字母后输入有效的数字")
+                    except ValueError:
+                        print("请输入有效的选择")
+            
+            # 只找到文件夹
+            elif matching_folders:
+                if len(matching_folders) == 1:
+                    # 只有一个匹配的文件夹，直接处理
+                    folder_path = matching_folders[0]
+                    print(f"找到匹配的文件夹: {folder_path}")
+                    # 处理文件夹中的所有Markdown文件
+                    for root, _, files in os.walk(folder_path):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            if file.lower().endswith(('.md', '.markdown')):
+                                result = process_file(file_path, output_folder)
+                                if result:
+                                    processed_count += 1
+                                else:
+                                    failed_count += 1
+                            else:
+                                skipped_count += 1
+                else:
+                    # 多个匹配的文件夹，询问用户选择
+                    print(f"找到多个匹配'{file_name_or_path}'的文件夹:")
+                    for i, folder_path in enumerate(matching_folders, 1):
+                        print(f"{i}. {folder_path}")
+                    
+                    # 获取用户选择
+                    while True:
+                        try:
+                            choice = input("请选择要处理的文件夹编号（输入q退出）: ").strip()
+                            if choice.lower() == 'q':
+                                return
+                            choice_index = int(choice) - 1
+                            if 0 <= choice_index < len(matching_folders):
+                                folder_path = matching_folders[choice_index]
+                                break
+                            else:
+                                print("无效的选择，请重新输入")
+                        except ValueError:
+                            print("请输入有效的数字")
+                    
+                    # 处理选择的文件夹
+                    print(f"处理文件夹: {folder_path}")
+                    for root, _, files in os.walk(folder_path):
+                        for file in files:
+                            file_path = os.path.join(root, file)
+                            if file.lower().endswith(('.md', '.markdown')):
+                                result = process_file(file_path, output_folder)
+                                if result:
+                                    processed_count += 1
+                                else:
+                                    failed_count += 1
+                            else:
+                                skipped_count += 1
+            
+            # 只找到文件
+            elif matching_files:
+                # 已有的文件处理逻辑
+                if len(matching_files) == 1:
+                    # 只有一个匹配项，直接处理
+                    path = matching_files[0]
+                    print(f"找到匹配文件: {path}")
+                    if path.lower().endswith(('.md', '.markdown')):
+                        result = process_file(path, output_folder)
+                        if result:
+                            processed_count += 1
+                        else:
+                            failed_count += 1
+                    else:
+                        print(f"跳过非Markdown文件：{path}")
+                        skipped_count += 1
+                else:
+                    # 多个匹配项，询问用户选择
+                    print(f"找到多个匹配'{file_name_or_path}'的文件:")
+                    for i, file_path in enumerate(matching_files, 1):
+                        print(f"{i}. {file_path}")
+                    
+                    # 获取用户选择
+                    while True:
+                        try:
+                            choice = input("请选择要处理的文件编号（输入q退出）: ").strip()
+                            if choice.lower() == 'q':
+                                return
+                            choice_index = int(choice) - 1
+                            if 0 <= choice_index < len(matching_files):
+                                path = matching_files[choice_index]
+                                break
+                            else:
+                                print("无效的选择，请重新输入")
+                        except ValueError:
+                            print("请输入有效的数字")
+                    
+                    # 处理选择的文件
+                    print(f"处理文件: {path}")
+                    if path.lower().endswith(('.md', '.markdown')):
+                        result = process_file(path, output_folder)
+                        if result:
+                            processed_count += 1
+                        else:
+                            failed_count += 1
+                    else:
+                        print(f"跳过非Markdown文件：{path}")
+                        skipped_count += 1
+            
+            # 没有找到匹配项
+            else:
+                print(f"没有找到匹配'{file_name_or_path}'的文件或文件夹")
+                return
+    
+    # 输出处理统计
+    print(f"\n处理完成！统计信息：")
+    print(f"- 成功处理的文件总数：{processed_count}")
+    if updated_count > 0:
+        print(f"- 已更新的文件数：{updated_count}")
+    if unchanged_count > 0:
+        print(f"- 未修改的文件数：{unchanged_count}")
+    print(f"- 处理失败的文件数：{failed_count}")
+    print(f"- 跳过的非Markdown文件数：{skipped_count}")
+
+# 添加加载用户决策的函数
+def load_user_decisions(decisions_file_path='callout_decisions.json'):
+    """
+    从JSON文件中加载用户对callout类型的处理决策
+    
+    Args:
+        decisions_file_path: 决策文件路径
+        
+    Returns:
+        包含用户决策的字典: {callout_type: decision}
+    """
+    user_decisions = {}
+    
+    # 确保文件所在目录存在
+    decisions_dir = os.path.dirname(decisions_file_path)
+    if decisions_dir and not os.path.exists(decisions_dir):
+        os.makedirs(decisions_dir)
+    
+    try:
+        if os.path.exists(decisions_file_path):
+            with open(decisions_file_path, 'r', encoding='utf-8') as f:
+                user_decisions = json.load(f)
+            print(f"已加载 {len(user_decisions)} 个callout类型的处理决策")
+        else:
+            # 文件不存在，创建空文件
+            with open(decisions_file_path, 'w', encoding='utf-8') as f:
+                json.dump({}, f, ensure_ascii=False, indent=2)
+            print(f"未找到决策记录文件，已创建新文件: {decisions_file_path}")
+    except Exception as e:
+        print(f"加载用户决策失败: {e}")
+    
+    return user_decisions
+
+# 添加保存用户决策的函数
+def save_user_decisions(user_decisions, decisions_file_path='callout_decisions.json'):
+    """
+    将用户对callout类型的处理决策保存到JSON文件
+    
+    Args:
+        user_decisions: 包含用户决策的字典
+        decisions_file_path: 决策文件路径
+    """
+    try:
+        # 确保文件所在目录存在
+        decisions_dir = os.path.dirname(decisions_file_path)
+        if decisions_dir and not os.path.exists(decisions_dir):
+            os.makedirs(decisions_dir)
+            
+        with open(decisions_file_path, 'w', encoding='utf-8') as f:
+            json.dump(user_decisions, f, ensure_ascii=False, indent=2)
+        print(f"已保存 {len(user_decisions)} 个callout类型的处理决策")
+    except Exception as e:
+        print(f"保存用户决策失败: {e}")
+
+if __name__ == "__main__":
+    # 获取用户输入的文件名、文件夹名或路径
+    input_text = input("请输入要处理的Markdown文件名、文件夹名或路径（留空则自动处理源文件夹）：").strip()
+    
+    # 处理给定输入或自动处理
+    process_folder(input_text)
