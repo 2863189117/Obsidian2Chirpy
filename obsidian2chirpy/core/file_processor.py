@@ -94,7 +94,7 @@ def process_file(file_path, output_folder=settings.OUTPUT_FOLDER):
                     )
             
             # 处理输入文本内容
-            processed_text = markdown_processor.process_and_format_md(input_text, file_path)
+            processed_text = markdown_processor.process_and_format_md(input_text, file_path, generate_summary=settings.ENABLE_AUTO_SUMMARY)
             _, new_content = text_utils.extract_yaml_and_content(processed_text)
             
             # 合并：保留更新后的YAML元数据，更新内容部分
@@ -109,7 +109,7 @@ def process_file(file_path, output_folder=settings.OUTPUT_FOLDER):
                 print(f"  - 已更新last_modified_at字段为: {updated_value}")
         else:
             # 文件不存在，按原逻辑处理
-            processed_text = markdown_processor.process_and_format_md(input_text, file_path)
+            processed_text = markdown_processor.process_and_format_md(input_text, file_path, generate_summary=settings.ENABLE_AUTO_SUMMARY)
             
             # 从处理后的内容中提取日期，用于文件名
             date_str = text_utils.extract_date_from_content(processed_text)
@@ -148,6 +148,7 @@ def process_folder(file_name_or_path):
     skipped_count = 0
     updated_count = 0
     unchanged_count = 0
+    summary_count = 0  # 添加摘要计数器
     
     # 确保输出文件夹存在
     if not os.path.exists(settings.OUTPUT_FOLDER):
@@ -240,7 +241,7 @@ def process_folder(file_name_or_path):
                         )
                 
                 # 处理输入文本内容
-                processed_text = markdown_processor.process_and_format_md(input_text, source_path)
+                processed_text = markdown_processor.process_and_format_md(input_text, source_path, generate_summary=settings.ENABLE_AUTO_SUMMARY)
                 _, new_content = text_utils.extract_yaml_and_content(processed_text)
                 
                 # 合并：保留更新后的YAML元数据，更新内容部分

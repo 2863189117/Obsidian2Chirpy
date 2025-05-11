@@ -6,9 +6,10 @@ YAML前置元数据处理模块
 import re
 import os
 from ..config import settings
+from ..utils import ai_utils
 
 
-def process_yaml_frontmatter(text, title=settings.DEFAULT_TITLE):
+def process_yaml_frontmatter(text, title=settings.DEFAULT_TITLE, generate_summary=False):
     """
     处理YAML前置元数据:
     1. 提取标题 (使用文件名)
@@ -18,10 +19,12 @@ def process_yaml_frontmatter(text, title=settings.DEFAULT_TITLE):
     5. 删除其他键值对
     6. 确保日期时间的秒数小于60
     7. 移除时间后的时区信息
+    8. 使用AI生成文章摘要并添加为description字段
     
     Args:
         text: 要处理的文本
         title: 文件标题，默认为"Untitled"
+        generate_summary: 是否生成文章摘要
         
     Returns:
         处理后的文本
@@ -89,6 +92,31 @@ def process_yaml_frontmatter(text, title=settings.DEFAULT_TITLE):
         if timezone:
             new_yaml += f" {timezone}"
         new_yaml += "\n"
+    
+    # 生成并添加摘要
+    if generate_summary and settings.ENABLE_AUTO_SUMMARY:
+        # 获取正文内容用于生成摘要
+        content_for_summary = rest_of_doc
+        
+        # 从正文内容中删除Markdown特殊格式，以便生成更好的摘要
+        # 删除代码块
+        content_for_summary = re.sub(r'```.*?```', '', content_for_summary, flags=re.DOTALL)
+        # 删除HTML标签
+        content_for_summary = re.sub(r'<.*?>', '', content_for_summary)
+        # 删除图片链接
+        content_for_summary = re.sub(r'!\[.*?\]\(.*?\)', '', content_for_summary)
+        # 删除URL链接，保留链接文本
+        content_for_summary = re.sub(r'\[(.*?)\]\(.*?\)', r'\1', content_for_summary)
+        
+        # 生成摘要
+        summary = ai_utils.generate_summary(content_for_summary, settings.SUMMARY_MAX_LENGTH)
+        
+        # 添加摘要到YAML
+        if summary:
+            # 处理摘要中可能包含的引号，确保YAML格式正确
+            summary = summary.replace('"', '\\"')
+            new_yaml += f'description: "{summary}"\n'
+            print(f"✓ 已自动生成摘要: {summary[:50]}...")
     
     new_yaml += "categories: \nmath: true\ntags: \n---\n\n"
     

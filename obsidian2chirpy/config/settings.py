@@ -13,6 +13,13 @@ INVENTORY_PATH = os.path.join(os.path.dirname(POSTS_ROOT), "md_files_inventory.t
 HASH_FILE_PATH = os.path.join(os.path.dirname(POSTS_ROOT), "file_hash_record.txt")
 DECISIONS_FILE_PATH = 'callout_decisions.json'
 
+# AI API设置
+AI_API_KEY = os.environ.get("DASHSCOPE_API_KEY", "")  # 从环境变量获取API密钥
+AI_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"  # 阿里云API URL
+AI_MODEL = "qwen-max-latest"  
+ENABLE_AUTO_SUMMARY = True  # 是否启用自动摘要功能
+SUMMARY_MAX_LENGTH = 100  # 摘要最大长度
+
 # Callout类型映射
 CALLOUT_TYPE_MAPPING = {
     'info': 'info',

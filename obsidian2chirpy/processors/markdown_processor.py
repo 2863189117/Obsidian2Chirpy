@@ -9,13 +9,14 @@ from ..utils import text_utils
 from ..config import settings
 
 
-def process_and_format_md(text, file_path=None):
+def process_and_format_md(text, file_path=None, generate_summary=False):
     """
     处理Markdown文件中的数学公式、callout等内容并格式化
     
     Args:
         text: 要处理的文本内容
         file_path: 文件路径，用于提取文件名作为标题
+        generate_summary: 是否使用AI生成文章摘要
     
     Returns:
         处理后的文本
@@ -27,7 +28,7 @@ def process_and_format_md(text, file_path=None):
         title = os.path.splitext(os.path.basename(file_path))[0]
     
     # 先处理YAML前置元数据
-    text = yaml_processor.process_yaml_frontmatter(text, title)
+    text = yaml_processor.process_yaml_frontmatter(text, title, generate_summary)
     
     # 将占位符标题替换为实际文件名
     text = text.replace(f'title: "{settings.DEFAULT_TITLE}"', f'title: "{title}"', 1)
